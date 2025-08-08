@@ -5,7 +5,7 @@ from google.cloud import firestore, storage
 import logging
 
 from app.database import get_firestore_client, get_storage_client
-from app.schemas.document import DocumentResponse
+from app.schemas.document import DocumentResponse, FolderItem, FileItem
 from app.services.document_service import DocumentService
 from app.config import settings
 
@@ -32,3 +32,23 @@ async def create_document(
     service = DocumentService()
     document = await service.create_document(file=file, folderName=folderName, folderId=folderId)
     return document
+
+@router.get("/documents", response_model=list[FolderItem | FileItem])
+async def get_documents(
+    folder_id: Optional[str] = None,
+    firestore_client = Depends(get_firestore_client),
+    storage_client = Depends(get_storage_client)
+):
+    """Get hierarchical folder structure with documents.
+    
+    Args:
+        folder_id: Optional folder ID to get specific folder structure
+        
+    Returns:
+        FolderItem: Hierarchical folder structure with nested files and folders
+    """
+    logger.info("[documents] Getting folder structure for folder_id=%s", folder_id)
+    
+    service = DocumentService()
+    items = await service.get_documents()
+    return items

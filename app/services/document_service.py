@@ -1,16 +1,19 @@
+from typing import List, Union
+from fastapi.encoders import jsonable_encoder
 import os
 import uuid
 import logging
-from typing import List
+from typing import List, Dict, Any
 from datetime import datetime, timedelta
 from fastapi import UploadFile, HTTPException
 from app.database import get_firestore_client, get_storage_client, get_storage_bucket_public_url
 from google.cloud.exceptions import GoogleCloudError
 from datetime import datetime
 
-from app.schemas.document import DocumentResponse
+from app.schemas.document import DocumentResponse, FolderItem, FileItem
 from app.config import settings
 from app.utils import process_filename_with_folder, extract_filename_parts
+from app.utils.common import normalize_datetime
 
 logger = logging.getLogger("app.document_service")
 
@@ -96,6 +99,7 @@ class DocumentService:
                 "original_filename": filename_metadata["original_filename"],  # Keep the original filename with folder
                 "content_type": file.content_type,
                 "file_size": file_size,
+                "file_type": filename_parts.get("extension"),
                 "storage_path": storage_url,
                 "is_active": True,
                 "created_at": current_time,
@@ -149,28 +153,87 @@ class DocumentService:
             created_at=record["created_at"],
         )
     
-    async def create_documents(
-        self,
-        files: List[UploadFile],
-        folderName: str = None
-    ) -> List[DocumentResponse]:
-        """Create multiple documents sequentially.
-
-        Currently processes files one-by-one; if one fails the previous ones remain.
-        Caller can implement compensation if needed.
-        
-        Args:
-            files: List of uploaded files
-            folderName: Optional folder name to remove from filenames
+    async def get_documents(self) -> List[Union['FolderItem', 'FileItem']]:
+        """Return a flat list of FolderItem and FileItem objects representing
+        the current document hierarchy. Each folder contains its children.
         """
-        if not files:
-            raise HTTPException(status_code=400, detail="No files provided")
-        results: List[DocumentResponse] = []
-        logger.info("Starting batch upload count=%d, folderName=%s", len(files), folderName)
-        for f in files:
-            logger.debug("Processing batch file '%s'", f.filename)
-            doc = await self.create_document(file=f, folderName=folderName)
-            results.append(doc)
-        logger.info("Completed batch upload count=%d", len(results))
-        return results
-      
+        try:
+            # Get all documents from Firestore
+            docs_ref = self.firestore_client.collection("documents")
+            
+            # Get all active documents
+            query = docs_ref.where("is_active", "==", True)     
+            docs = query.stream()
+            
+            # If no documents found and no folder_id specified, return sample structure
+            all_docs = list(docs)
+            if not all_docs:
+                return []
+            
+            # Group documents by folder_name to create folder structure
+            folder_groups: Dict[str, List[Dict[str, Any]]] = {}
+            documents_without_folder = []
+            
+            for doc in all_docs:
+                doc_data = doc.to_dict()
+                doc_data["id"] = doc.id
+                
+                # Group by folder_name if it exists
+                folder_name = doc_data.get("folder_name")
+                folder_id = doc_data.get("folder_id")
+                
+                if folder_name and folder_name.strip():
+                    if folder_name not in folder_groups:
+                        folder_groups[folder_id] = []
+                    folder_groups[folder_id].append(doc_data)
+                else:
+                    documents_without_folder.append(doc_data)
+            
+            # Create the root folder structure
+            items = []
+
+            # Add folder items
+            for folder_id, folder_docs in folder_groups.items():
+                # Create folder item
+                folder_item = FolderItem(
+                    id=folder_id,
+                    name=folder_docs[0].get("folder_name"),
+                    created_at=normalize_datetime(folder_docs[0].get("created_at")),
+                    children=[]
+                )
+                
+                # Add files to folder
+                for doc in folder_docs:
+                    file_extension = doc.get("file_type", "").lower().replace(".", "")
+                    file_item = FileItem(
+                        id=doc["id"],
+                        name=doc["original_filename"],
+                        created_at=normalize_datetime(doc.get("created_at")),
+                        file_type=file_extension
+                    )
+                    folder_item.children.append(file_item)
+                
+                items.append(folder_item)
+            
+            # Add files without folder directly to root
+            for doc in documents_without_folder:
+                file_extension = doc.get("file_type", "").lower().replace(".", "")
+                file_item = FileItem(
+                    id=doc["id"],
+                    name=doc["original_filename"],
+                    created_at=normalize_datetime(doc.get("created_at")),
+                    file_type=file_extension
+                )
+                items.append(file_item)
+            
+            # Return actual Pydantic models; FastAPI will handle serialization
+            return items
+            
+        except GoogleCloudError as e:
+            logger.exception("Google Cloud error getting folder structure")
+            raise HTTPException(status_code=502, detail=f"Firestore error: {e}")
+        except Exception as e:
+            logger.exception("Unexpected error getting folder structure")
+            raise HTTPException(status_code=500, detail=f"Failed to get folder structure: {e}")
+
+   

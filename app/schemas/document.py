@@ -1,6 +1,6 @@
 from datetime import datetime
-from typing import Optional, List
-from pydantic import BaseModel
+from typing import Optional, List, Union
+from pydantic import BaseModel, Field
 
 class DocumentBase(BaseModel):
     filename: str
@@ -24,6 +24,25 @@ class DocumentResponse(DocumentBase):
 
     class Config:
         from_attributes = True
+
+# Hierarchical folder/document structure schemas
+class FileItem(BaseModel):
+    id: str
+    name: str
+    created_at: datetime
+    type: str = "file"
+    file_type: str
+
+class FolderItem(BaseModel):
+    id: str
+    name: str
+    created_at: datetime
+    type: str = "folder"
+    # Use default_factory to avoid mutable default list being shared across instances
+    children: List[Union['FolderItem', 'FileItem']] = Field(default_factory=list)
+
+# Enable forward references for recursive model
+FolderItem.model_rebuild()
 
 # Aliases for backward compatibility
 Document = DocumentResponse
