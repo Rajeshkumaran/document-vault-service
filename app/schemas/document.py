@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional, List, Union
+from typing import Optional, List, Union, Dict, Any
 from pydantic import BaseModel, Field
 
 class DocumentBase(BaseModel):
@@ -25,6 +25,13 @@ class DocumentResponse(DocumentBase):
     class Config:
         from_attributes = True
 
+class AISummaryResponse(DocumentBase):
+    id: str  # Changed from int to str for Firestore document IDs
+    summary: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
 # Hierarchical folder/document structure schemas
 class FileItem(BaseModel):
     id: str
@@ -32,6 +39,7 @@ class FileItem(BaseModel):
     created_at: datetime
     type: str = "file"
     file_type: str
+    storage_path: Optional[str] = None
 
 class FolderItem(BaseModel):
     id: str

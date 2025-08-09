@@ -5,7 +5,7 @@ from google.cloud import firestore, storage
 import logging
 
 from app.database import get_firestore_client, get_storage_client
-from app.schemas.document import DocumentResponse, FolderItem, FileItem
+from app.schemas.document import DocumentResponse, FolderItem, FileItem, AISummaryResponse
 from app.services.document_service import DocumentService
 from app.config import settings
 
@@ -52,3 +52,24 @@ async def get_documents(
     service = DocumentService()
     items = await service.get_documents()
     return items
+
+
+@router.get("/documents/{document_id}/summary", response_model=AISummaryResponse)
+async def get_document_summary(
+    document_id: str,
+    firestore_client = Depends(get_firestore_client),
+    storage_client = Depends(get_storage_client)
+):
+    """Get a summary of a specific document.
+
+    Args:
+        document_id: The ID of the document to retrieve
+
+    Returns:
+        DocumentResponse: The document summary
+    """
+    logger.info("[documents] Getting summary for document_id=%s", document_id)
+
+    service = DocumentService()
+    document = await service.get_document_summary(document_id=document_id)
+    return document

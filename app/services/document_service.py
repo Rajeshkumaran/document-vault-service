@@ -10,13 +10,101 @@ from app.database import get_firestore_client, get_storage_client, get_storage_b
 from google.cloud.exceptions import GoogleCloudError
 from datetime import datetime
 
-from app.schemas.document import DocumentResponse, FolderItem, FileItem
+from app.schemas.document import AISummaryResponse, DocumentResponse, FolderItem, FileItem
 from app.config import settings
 from app.utils import process_filename_with_folder, extract_filename_parts
-from app.utils.common import normalize_datetime
+from app.utils.common import extract_blob_name, normalize_datetime, download_blob_text_with_parsing
 
 logger = logging.getLogger("app.document_service")
 
+mock_summary = """
+title: "Product Sync — AI-Powered Search (Aug 6, 2025)"
+type: "meeting_summary"
+authors: ["A. Patel (PM)", "R. Kumar (Eng)"]
+date: "2025-08-06T10:30:00+05:30"
+reading_time: "2 min"
+tags: ["product", "search", "roadmap", "action-items"]
+---
+
+# Product Sync — AI-Powered Search (Aug 6, 2025)
+
+**TL;DR**  
+The team agreed to prioritize semantic ranking and reduce inference cost by batching embeddings. MVP scope includes semantic search + fuzzy fallback, A/B test with 10% traffic, and a rollout plan for Q4. Key blockers: dataset labelling and infra cost approval.
+
+---
+
+## Key Decisions
+- **MVP scope:** Semantic ranking, fuzzy fallback, result re-ranking for top 50 results.
+- **Traffic ramp:** Start A/B test at **10%** of traffic for 3 weeks, then scale to 50% if CTR improves ≥ 7%.
+- **Cost control:** Use batched embeddings (monthly budget cap ₹120,000) and per-query cache TTL = 6 hours.
+
+---
+
+## Action Items
+| Owner | Task | Due |
+|---|---:|---:|
+| R. Kumar (Eng) | Implement batched embedding pipeline + cache layer (Redis). | 2025-08-13 |
+| S. Mehta (DS) | Create labelled relevance dataset (1,500 queries) and baseline eval. | 2025-08-20 |
+| A. Patel (PM) | Prepare A/B experiment plan & success criteria. | 2025-08-10 |
+| Ops | Estimate infra cost & request budget approval. | 2025-08-12 |
+
+---
+
+## Metrics to Watch
+- **Primary:** Click-through rate (CTR) on top-5 results (target +7% vs control)
+- **Secondary:** Query latency (P95 < 250 ms), cost per 1,000 queries
+- **Safety:** Rate of unsafe or hallucinated answers (target < 0.5%)
+
+---
+
+## Risks & Mitigations
+- **Risk:** Embedding model cost exceeds projection.  
+  **Mitigation:** Use smaller model for low-value queries; cache aggressively.
+- **Risk:** Labelled dataset biased by current user cohort.  
+  **Mitigation:** Sample queries from multiple regions and verticals; run fairness checks.
+
+---
+
+## Full Notes
+**Background:** Business requested improved discovery for long-tail products. Current keyword-based search returns low recall for synonyms and paraphrases.
+
+**Proposal:** Integrate semantic embeddings at query time for ranking, keep existing lexical score as a safety fallback. Use a hybrid score: `score = α * semantic_score + (1-α) * lexical_score` where α = 0.7 for initial experiments.
+
+**Implementation details discussed:**
+- Batch embedding API calls every 2 seconds for queued queries, with opportunistic caching for repeated queries.
+- Store document embeddings in vector DB (annoy/hnsw) with nightly reindexing for new products.
+- Telemetry: add `search_experiment_bucket` and `relevance_signal` events.
+
+**Open questions:**
+1. Which vector DB in prod? (Weigh latency vs cost)
+2. How to handle private product fields in embeddings?
+
+---
+
+## Example Highlight (AI-generated excerpt)
+> *“After switching to semantic-first ranking, we observed a 9.3% increase in top-5 CTR during the internal pilot. Lexical fallback reduced irrelevant answers by 42%.”* — A. Patel
+
+---
+
+## Attachments
+- `relevance_dataset_v1.csv` (1,500 rows)  
+- A/B test plan — `ab_plan_semantic_search.md`
+
+---
+
+## Follow-ups
+- Review infra budget proposal on **2025-08-12** (Ops meeting).
+- DS and Eng to run initial offline eval and share results in the next sync (2025-08-13).
+
+---
+
+### Render hints (for apps)
+- Use `reading_time` from frontmatter to show quick preview.  
+- Display `Action Items` as a checklist with due-date badges.  
+- Highlight `TL;DR`, `Key Decisions`, and `Metrics` on a compact card for dashboards.
+
+---
+"""
 class DocumentService:
     def __init__(self):
         self.firestore_client = get_firestore_client()
@@ -209,7 +297,8 @@ class DocumentService:
                         id=doc["id"],
                         name=doc["original_filename"],
                         created_at=normalize_datetime(doc.get("created_at")),
-                        file_type=file_extension
+                        file_type=file_extension,
+                        storage_path=doc["storage_path"]
                     )
                     folder_item.children.append(file_item)
                 
@@ -222,7 +311,8 @@ class DocumentService:
                     id=doc["id"],
                     name=doc["original_filename"],
                     created_at=normalize_datetime(doc.get("created_at")),
-                    file_type=file_extension
+                    file_type=file_extension,
+                    storage_path=doc["storage_path"]
                 )
                 items.append(file_item)
             
@@ -236,4 +326,49 @@ class DocumentService:
             logger.exception("Unexpected error getting folder structure")
             raise HTTPException(status_code=500, detail=f"Failed to get folder structure: {e}")
 
-   
+    async def get_document_summary(self, document_id: str) -> AISummaryResponse:
+        try:
+            logger.info("Getting summary for document_id=%s", document_id)
+            doc_ref = self.firestore_client.collection("documents").document(document_id)
+            # Firestore Python client SDK is synchronous. Run in a thread to avoid blocking the event loop.
+            import asyncio
+            loop = asyncio.get_running_loop()
+            doc = await loop.run_in_executor(None, doc_ref.get)
+            if not doc.exists:
+                raise HTTPException(status_code=404, detail="Document not found")
+            # Always populate required fields for AISummaryResponse
+            response_data = {}
+            doc_data = doc.to_dict()
+            storage_path = doc_data.get("storage_path")
+            logger.info("Document found summary for filename=%s", doc_data.get("filename", "unknown"))
+            
+
+            # Attempt to derive blob name from the stored URL (signed URL or public URL)
+            blob_name = None
+            if storage_path:
+                # Signed URLs typically contain the object path right after the bucket host; try parsing
+                try:
+                    blob_name = extract_blob_name(storage_path)
+                except Exception:
+                    logger.info("Could not parse blob name from storage path '%s'", storage_path)
+                    blob_name = None
+
+            # Ensure filename field is always set, even if we cannot resolve blob/content
+            response_data["filename"] = doc_data.get("filename", "")
+
+            # Attempt to download textual content (safe no-raise helper)
+            file_text_content = download_blob_text_with_parsing(self.storage_client, blob_name) if blob_name else None
+            logger.info("Document found summary for file_text_content=%s", file_text_content)
+
+            # Placeholder LLM logic: generate a trivial summary from first N chars / lines
+            response_data["summary"] = mock_summary if file_text_content else ""
+            response_data["id"] = doc_data.get("id", document_id)
+
+            return AISummaryResponse(**response_data)
+
+        except GoogleCloudError as e:
+            logger.exception("Google Cloud error getting document summary")
+            raise HTTPException(status_code=502, detail=f"Firestore error: {e}")
+        except Exception as e:
+            logger.exception("Unexpected error getting document summary")
+            raise HTTPException(status_code=500, detail=f"Failed to get document summary: {e}")
