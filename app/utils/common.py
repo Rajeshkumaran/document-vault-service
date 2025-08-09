@@ -6,6 +6,8 @@ import io
 from app.config import settings
 import PyPDF2
 import docx
+import pdfplumber
+
     
 logger = logging.getLogger("app.utils.common")
 
@@ -67,12 +69,21 @@ def download_blob_text_with_parsing(storage_client: storage.Client, blob_name: s
 
         # PDF parsing
         elif content_type == "application/pdf" or blob_name.lower().endswith(".pdf"):
-            pdf_text = []
-            with io.BytesIO(file_bytes) as pdf_stream:
-                reader = PyPDF2.PdfReader(pdf_stream)
-                for page in reader.pages:
-                    pdf_text.append(page.extract_text() or "")
-            return "\n".join(pdf_text).strip() or None
+            # pdf_text = []
+            # logger.info("Extracted text from PDF 1'%s': %d characters", blob_name, sum(len(p) for p in pdf_text))
+            
+            # with io.BytesIO(file_bytes) as pdf_stream:
+            #     reader = PyPDF2.PdfReader(pdf_stream)
+            #     for page in reader.pages:
+            #         pdf_text.append(page.extract_text() or "")
+            # logger.info("Extracted text from PDF '%s': %d characters", blob_name, sum(len(p) for p in pdf_text))
+            # return "\n".join(pdf_text).strip() or None
+
+            text_parts = []
+            with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+                for page in pdf.pages:
+                    text_parts.append(page.extract_text() or "")
+            return "\n".join(text_parts).strip() or None
 
         # DOCX parsing
         elif content_type in (

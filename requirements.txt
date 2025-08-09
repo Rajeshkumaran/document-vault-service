@@ -1,3 +1,4 @@
+# Production dependencies
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 pydantic==2.5.0
@@ -9,7 +10,6 @@ google-cloud-firestore==2.11.1
 google-cloud-storage==2.10.0
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
-pytest==7.4.3
-pytest-asyncio==0.21.1
 httpx==0.25.2
-anthropic==0.30.0  # Added for Claude summarization (adjust version as needed)
+anthropic==0.30.0  # Added for Claude summarization
+pdfplumber==0.11.4  # Added for PDF text extraction

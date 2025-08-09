@@ -3,9 +3,10 @@ from fastapi.encoders import jsonable_encoder
 import os
 import uuid
 import logging
+import asyncio
 from typing import List, Dict, Any
 from datetime import datetime, timedelta
-from fastapi import UploadFile, HTTPException
+from fastapi import UploadFile, HTTPException, BackgroundTasks
 from app.database import get_firestore_client, get_storage_client, get_storage_bucket_public_url
 from google.cloud.exceptions import GoogleCloudError
 from datetime import datetime
@@ -176,11 +177,13 @@ class DocumentService:
         self.firestore_client = get_firestore_client()
         self.storage_client = get_storage_client()
 
+   
     async def create_document(
         self,
         file: UploadFile,
         folderName: str,
-        folderId: str
+        folderId: str,
+        background_tasks: Optional[BackgroundTasks] = None
     ) -> DocumentResponse:
 
         logger.info("Starting upload for file '%s' (content_type=%s, folderName=%s, folderId=%s)", file.filename, file.content_type, folderName, folderId)
@@ -295,7 +298,21 @@ class DocumentService:
                 pass
             raise HTTPException(status_code=500, detail=f"Failed to save document metadata: {e}")
 
-        # 6. Build response
+        # 6. Trigger background summary generation if background_tasks is provided
+        if background_tasks:
+            try:
+                logger.info("Adding background task for summary generation of document_id=%s", record["id"])
+                background_tasks.add_task(
+                    self._generate_summary_background,
+                    record["id"],
+                    filename,  # The unique filename in storage
+                    filename   # blob_name is same as filename in our case
+                )
+            except Exception as e:
+                logger.warning("Failed to add background summary generation task: %s", str(e))
+                # Don't fail the upload if background task scheduling fails
+
+        # 7. Build response
         return DocumentResponse(
             id=record["id"],
             filename=record["filename"],
@@ -422,8 +439,36 @@ class DocumentService:
                 }
                 return AISummaryResponse(**response_data)
             
-            # No existing summary, generate one
-            logger.info("No existing summary, generating new one for document_id=%s", document_id)
+            # No existing summary found, check if generation is in progress
+            try:
+                progress_ref = self.firestore_client.collection("document_summary_progress").document(document_id)
+                progress_doc = await loop.run_in_executor(None, progress_ref.get)
+                
+                if progress_doc.exists:
+                    progress_data = progress_doc.to_dict()
+                    status = progress_data.get("status")
+                    
+                    if status == "generating":
+                        logger.info("Summary generation in progress for document_id=%s", document_id)
+                        response_data = {
+                            "id": document_id,
+                            "filename": filename,
+                            "summary": "Summary is being generated in the background. Please check back in a few moments."
+                        }
+                        return AISummaryResponse(**response_data)
+                    elif status == "failed":
+                        error_msg = progress_data.get("error", "Unknown error")
+                        logger.info("Background summary generation failed for document_id=%s: %s", document_id, error_msg)
+                        # Clean up failed progress record
+                        try:
+                            await loop.run_in_executor(None, progress_ref.delete)
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.warning("Failed to check summary progress: %s", str(e))
+            
+            # No existing summary and no generation in progress, generate one synchronously as fallback
+            logger.info("Generating summary synchronously for document_id=%s", document_id)
             
             # Get document content
             blob_name = None
@@ -443,7 +488,7 @@ class DocumentService:
                 )
             else:
                 logger.warning("No file content available for summarization")
-                summary_text = ""
+                summary_text = "Unable to generate summary: Document content could not be extracted."
             
             response_data = {
                 "id": document_id,
@@ -459,3 +504,106 @@ class DocumentService:
         except Exception as e:
             logger.exception("Unexpected error getting document summary")
             raise HTTPException(status_code=500, detail=f"Failed to get document summary: {e}")
+
+
+    async def _generate_summary_background(self, document_id: str, filename: str, blob_name: str):
+        """Background task to generate document summary after upload."""
+        try:
+            logger.info("Starting background summary generation for document_id=%s", document_id)
+            
+            # Store a flag indicating summary generation is in progress
+            try:
+                summary_progress_ref = self.firestore_client.collection("document_summary_progress").document(document_id)
+                await asyncio.get_running_loop().run_in_executor(
+                    None, 
+                    summary_progress_ref.set, 
+                    {
+                        "document_id": document_id,
+                        "status": "generating",
+                        "started_at": datetime.utcnow()
+                    }
+                )
+            except Exception as e:
+                logger.warning("Failed to set summary progress flag: %s", str(e))
+            
+            # Download and parse document content
+            file_text_content = download_blob_text_with_parsing(self.storage_client, blob_name)
+            
+            if not file_text_content:
+                logger.warning("No text content extracted from document_id=%s, skipping summary generation", document_id)
+                # Update progress status
+                try:
+                    summary_progress_ref = self.firestore_client.collection("document_summary_progress").document(document_id)
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, 
+                        summary_progress_ref.set, 
+                        {
+                            "document_id": document_id,
+                            "status": "failed",
+                            "error": "No text content extracted",
+                            "completed_at": datetime.utcnow()
+                        }
+                    )
+                except Exception:
+                    pass
+                return
+            
+            # Initialize summarize service and generate summary
+            summarize_service = SummarizeService()
+            summary_text = await summarize_service.generate_document_summary(file_text_content, filename)
+            
+            if summary_text:
+                # Store the generated summary
+                await summarize_service.store_document_summary(document_id, summary_text)
+                logger.info("Successfully generated and stored summary for document_id=%s", document_id)
+                
+                # Update progress status to completed
+                try:
+                    summary_progress_ref = self.firestore_client.collection("document_summary_progress").document(document_id)
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, 
+                        summary_progress_ref.set, 
+                        {
+                            "document_id": document_id,
+                            "status": "completed",
+                            "completed_at": datetime.utcnow()
+                        }
+                    )
+                except Exception as e:
+                    logger.warning("Failed to update summary progress status: %s", str(e))
+            else:
+                logger.warning("Failed to generate summary for document_id=%s", document_id)
+                # Update progress status to failed
+                try:
+                    summary_progress_ref = self.firestore_client.collection("document_summary_progress").document(document_id)
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, 
+                        summary_progress_ref.set, 
+                        {
+                            "document_id": document_id,
+                            "status": "failed",
+                            "error": "Summary generation failed",
+                            "completed_at": datetime.utcnow()
+                        }
+                    )
+                except Exception:
+                    pass
+                
+        except Exception as e:
+            logger.exception("Error in background summary generation for document_id=%s: %s", document_id, str(e))
+            # Update progress status to failed
+            try:
+                summary_progress_ref = self.firestore_client.collection("document_summary_progress").document(document_id)
+                await asyncio.get_running_loop().run_in_executor(
+                    None, 
+                    summary_progress_ref.set, 
+                    {
+                        "document_id": document_id,
+                        "status": "failed",
+                        "error": str(e),
+                        "completed_at": datetime.utcnow()
+                    }
+                )
+            except Exception:
+                pass
+            # Don't raise exceptions in background tasks as they won't be handled by the caller
