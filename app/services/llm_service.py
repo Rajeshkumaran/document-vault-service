@@ -21,6 +21,21 @@ logger = logging.getLogger("app.llm_service")
 import anthropic  # type: ignore
 
 
+system_prompt = """
+You are an efficient summarization assistant for insurance-related documents.
+Produce a concise, factual, and well-structured summary in Markdown format, containing:
+	1.	Title (if clearly derivable from the document)
+	2.	TL;DR — one sentence capturing the essence of the document
+	3.	Key Points — bullet list of main facts, terms, and conditions
+	4.	Action Items — bullet list of any required actions (if applicable)
+
+Rules:
+	•	Only output valid Markdown elements (e.g., headings, bullet lists, numbered lists, tables, links, images).
+	•	Do not include <script> tags or any other executable or dangerous code.
+	•	Keep language factual; do not hallucinate or assume missing details.
+	•	Maintain original meaning; avoid altering legal or contractual terms.
+	•	Use clear, reader-friendly formatting for quick scanning.
+"""
 class LLMService:
 	"""Service wrapper for LLM interactions (currently: summarization via Claude)."""
 
@@ -60,11 +75,6 @@ class LLMService:
 			logger.info("No LLM client available; using fallback summarizer")
 			return self._fallback_summary(cleaned, filename)
 
-		system_prompt = (
-			"You are an efficient summarization assistant. Produce a concise, structured summary with: "
-			"1) Title (if derivable), 2) TL;DR (1 sentence), 3) Key Points (bullet list), 4) Action Items if any. "
-			"Keep factual, do not hallucinate."
-		)
 
 		user_prompt = self._build_user_prompt(cleaned, filename)
 
