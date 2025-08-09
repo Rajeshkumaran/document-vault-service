@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     ALLOWED_EXTENSIONS: str = ".pdf,.docx"
     
   
+    ANTHROPIC_API_KEY: str = os.environ.get("ANTHROPIC_API_KEY", "")
     @property
     def allowed_extensions_list(self) -> List[str]:
         """Convert the comma-separated string to a list"""

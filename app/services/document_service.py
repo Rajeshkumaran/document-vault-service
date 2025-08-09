@@ -12,6 +12,8 @@ from datetime import datetime
 
 from app.schemas.document import AISummaryResponse, DocumentResponse, FolderItem, FileItem
 from app.config import settings
+from app.services import llm_service
+from app.services.llm_service import get_llm_service
 from app.utils import process_filename_with_folder, extract_filename_parts
 from app.utils.common import extract_blob_name, normalize_datetime, download_blob_text_with_parsing
 
@@ -104,6 +106,70 @@ The team agreed to prioritize semantic ranking and reduce inference cost by batc
 - Highlight `TL;DR`, `Key Decisions`, and `Metrics` on a compact card for dashboards.
 
 ---
+"""
+
+mock_summary_2 = """
+# Summary – Sampoorn Suraksha Master Proposal Form
+
+## Product Overview
+- **Product Name:** SBI Life – Sampoorn Suraksha  
+- **UIN:** 111N040V04  
+- **Type:** Group non-linked, non-participating, pure risk premium life insurance  
+- **Applicable For:** Non Employer – Employee Groups  
+
+## General Instructions
+1. All questions in the form must be answered.  
+2. Tick (✔) wherever applicable.  
+3. Any cancellation/alteration must be authenticated by authorised signatories.  
+4. Insurance is a contract of utmost good faith — all material facts must be disclosed.  
+5. Provide details if “Others” is selected in any field.
+
+## Scheme Details
+- **Nature:** Compulsory or Voluntary  
+- **If Voluntary:** % of premium by policyholder and by member  
+- **Entry Age Range:** [To be specified in the form]  
+
+## Proposer Details
+- **Proposed Policyholder Name:** [To be filled]  
+- **Registered / Head Office Address & Pin Code:** [To be filled]  
+- **Mailing Address:** [To be filled]  
+- **Contact Details:**
+  - Telephone No.  
+  - Fax No.  
+  - Email Address  
+  [Link Text](https://example.com)
+
+### Authorised Signatories
+| Signatory | Name | Designation | Telephone | Fax | Email |
+|-----------|------|-------------|-----------|-----|-------|
+| 1         |      |             |           |     |       |
+| 2         |      |             |           |     |       |
+| 3         |      |             |           |     |       |
+
+- **Minimum number of authorised signatures required:** [To be filled]  
+
+## Organisation Details
+- **Type of Business / Trade / Activity:** [To be filled]  
+- **Source of Lead:** Direct / Broking / Corporate Agency / Others (Specify)  
+- **Organisation Category** (for Lender-Borrower groups):  
+  - RBI-regulated Scheduled Commercial Banks (incl. Co-op Banks)  
+  - NBFC with RBI Certificate of Registration  
+  - NHB-regulated Housing Finance Companies  
+  - Small Finance Banks regulated by RBI  
+  - Microfinance companies under Sec 8 of Companies Act 2013  
+  - Others as approved by authority  
+
+## PAN Requirement
+- Provide PAN or submit Form 60 if annualised premium exceeds ₹50,000.  
+[Link Text](https://example.com)
+## Additional Notes
+- Contact Information:  
+  - **Toll-Free:** 1800 267 9090 (24×7)  
+  - **Email:** info@sbilife.co.in  
+  - **Website:** www.sbilife.co.in  
+- **Registered Office:** ‘Natraj’, M.V. Road & Western Express Highway Junction, Andheri (E), Mumbai – 400069  
+- **Disclaimer:** SBI Life Insurance Company Limited and SBI are separate legal entities.  
+[Link Text](https://example.com)
 """
 class DocumentService:
     def __init__(self):
@@ -357,10 +423,16 @@ class DocumentService:
 
             # Attempt to download textual content (safe no-raise helper)
             file_text_content = download_blob_text_with_parsing(self.storage_client, blob_name) if blob_name else None
-            logger.info("Document found summary for file_text_content=%s", file_text_content)
+            logger.info("Document found for summarization")
 
-            # Placeholder LLM logic: generate a trivial summary from first N chars / lines
-            response_data["summary"] = mock_summary if file_text_content else ""
+            llm_service = get_llm_service()
+            if file_text_content is None:
+                response_data["summary"] = llm_service.summarize(file_text_content, response_data["filename"]) 
+                # store summary in firebase
+            else:
+                response_data["summary"] = ""
+
+            # response_data["summary"] = mock_summary_2 if file_text_content else ""
             response_data["id"] = doc_data.get("id", document_id)
 
             return AISummaryResponse(**response_data)
