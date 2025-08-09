@@ -32,6 +32,19 @@ class AISummaryResponse(DocumentBase):
     class Config:
         from_attributes = True
 
+class DocumentSummaryCreate(BaseModel):
+    document_id: str
+    summary_text: str
+
+class DocumentSummaryResponse(BaseModel):
+    document_id: str
+    summary_text: str
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
 # Hierarchical folder/document structure schemas
 class FileItem(BaseModel):
     id: str

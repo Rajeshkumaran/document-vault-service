@@ -1,4 +1,4 @@
-from typing import List, Union
+from typing import List, Union, Optional
 from fastapi.encoders import jsonable_encoder
 import os
 import uuid
@@ -11,9 +11,9 @@ from google.cloud.exceptions import GoogleCloudError
 from datetime import datetime
 
 from app.schemas.document import AISummaryResponse, DocumentResponse, FolderItem, FileItem
+from app.models.document import DocumentSummary
+from app.services.summarize_service import SummarizeService
 from app.config import settings
-from app.services import llm_service
-from app.services.llm_service import get_llm_service
 from app.utils import process_filename_with_folder, extract_filename_parts
 from app.utils.common import extract_blob_name, normalize_datetime, download_blob_text_with_parsing
 
@@ -392,49 +392,65 @@ class DocumentService:
             raise HTTPException(status_code=500, detail=f"Failed to get folder structure: {e}")
 
     async def get_document_summary(self, document_id: str) -> AISummaryResponse:
+        """Get document summary using the SummarizeService."""
         try:
             logger.info("Getting summary for document_id=%s", document_id)
+            
+            # Get document details
             doc_ref = self.firestore_client.collection("documents").document(document_id)
-            # Firestore Python client SDK is synchronous. Run in a thread to avoid blocking the event loop.
             import asyncio
             loop = asyncio.get_running_loop()
             doc = await loop.run_in_executor(None, doc_ref.get)
             if not doc.exists:
                 raise HTTPException(status_code=404, detail="Document not found")
-            # Always populate required fields for AISummaryResponse
-            response_data = {}
-            doc_data = doc.to_dict()
-            storage_path = doc_data.get("storage_path")
-            logger.info("Document found summary for filename=%s", doc_data.get("filename", "unknown"))
             
-
-            # Attempt to derive blob name from the stored URL (signed URL or public URL)
+            doc_data = doc.to_dict()
+            filename = doc_data.get("filename", "")
+            storage_path = doc_data.get("storage_path")
+            
+            # Initialize summarize service
+            summarize_service = SummarizeService()
+            
+            # Check for existing summary first
+            stored_summary = await summarize_service.get_stored_document_summary(document_id)
+            if stored_summary:
+                logger.info("Found existing summary for document_id=%s", document_id)
+                response_data = {
+                    "id": document_id,
+                    "filename": filename,
+                    "summary": stored_summary.summary_text
+                }
+                return AISummaryResponse(**response_data)
+            
+            # No existing summary, generate one
+            logger.info("No existing summary, generating new one for document_id=%s", document_id)
+            
+            # Get document content
             blob_name = None
             if storage_path:
-                # Signed URLs typically contain the object path right after the bucket host; try parsing
                 try:
                     blob_name = extract_blob_name(storage_path)
                 except Exception:
                     logger.info("Could not parse blob name from storage path '%s'", storage_path)
                     blob_name = None
-
-            # Ensure filename field is always set, even if we cannot resolve blob/content
-            response_data["filename"] = doc_data.get("filename", "")
-
-            # Attempt to download textual content (safe no-raise helper)
+            
+            # Download and summarize content
             file_text_content = download_blob_text_with_parsing(self.storage_client, blob_name) if blob_name else None
-            logger.info("Document found for summarization")
-
-            llm_service = get_llm_service()
-            if file_text_content is None:
-                response_data["summary"] = llm_service.summarize(file_text_content, response_data["filename"]) 
-                # store summary in firebase
+            
+            if file_text_content:
+                summary_text = await summarize_service.get_or_generate_summary(
+                    document_id, file_text_content, filename
+                )
             else:
-                response_data["summary"] = ""
-
-            # response_data["summary"] = mock_summary_2 if file_text_content else ""
-            response_data["id"] = doc_data.get("id", document_id)
-
+                logger.warning("No file content available for summarization")
+                summary_text = ""
+            
+            response_data = {
+                "id": document_id,
+                "filename": filename,
+                "summary": summary_text
+            }
+            
             return AISummaryResponse(**response_data)
 
         except GoogleCloudError as e:

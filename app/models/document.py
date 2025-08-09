@@ -16,3 +16,13 @@ class Document(BaseModel):
     
     class Config:
         from_attributes = True
+
+class DocumentSummary(BaseModel):
+    """Document summary model for Firebase"""
+    document_id: str
+    summary_text: str
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    
+    class Config:
+        from_attributes = True
