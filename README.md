@@ -1,21 +1,26 @@
 # Document Vault Service
 
-A FastAPI-based document management service powered by Supabase.
+A FastAPI-based document management service powered by Firebase/Google Cloud with AI-powered summarization.
 
 ## Features
 
-- Document upload and storage
+- Document upload and storage with hierarchical folder structure
+- AI-powered document summarization using Claude (Anthropic)
 - Document retrieval and management
 - RESTful API endpoints
-- Supabase database integration
-- Supabase Storage for file storage
+- Firebase & Firestore database integration
+- PDF text extraction and processing
 - File validation and processing
-- Dual storage (local backup + Supabase Storage)
+- Background task processing for document summarization
 
 ## Prerequisites
 
-1. **Supabase Project**: Create a new project at [supabase.com](https://supabase.com)
+1. **Firebase Project**: Create a new project at [firebase.google.com](https://firebase.google.com)
+   - Enable Firestore Database
+   - Enable Cloud Storage
+   - Create a service account and download the JSON credentials
 2. **Python 3.8+**: Make sure you have Python installed
+3. **Anthropic API Key**: Optional, for AI-powered document summarization
 
 ## Setup
 
@@ -32,24 +37,31 @@ venv\Scripts\activate  # On Windows
 pip install -r requirements.txt
 ```
 
-### 3. Set up Supabase:
+### 3. Set up Firebase
 
-1. Go to your Supabase project dashboard
-2. Get your project URL and anon key from **Settings > API**
-3. Run the SQL script from `supabase_setup.sql` in your Supabase SQL editor
-4. Create a storage bucket named "documents" in **Storage**
+1. Go to your Firebase project console
+2. Enable Firestore Database in Native mode
+3. Enable Cloud Storage and create a bucket
+4. Go to **Project settings > Service accounts**
+5. Generate a new private key and download the JSON file
+6. Place the service account JSON file in the `app/` directory as `service-account.json`
 
-### 4. Set up environment variables:
+### 4. Set up environment variables
+
 ```bash
 cp .env.example .env
-# Edit .env with your Supabase configuration
+# Edit .env with your Firebase configuration
 ```
 
 Your `.env` should look like:
+
 ```env
-SUPABASE_URL=https://your-project-id.supabase.co
-SUPABASE_ANON_KEY=your-anon-key-here
-SUPABASE_SERVICE_KEY=your-service-key-here
+FIREBASE_PROJECT_ID=your-project-id
+FIREBASE_STORAGE_BUCKET=your-project-id.appspot.com
+FIREBASE_CREDENTIALS_PATH=app/service-account.json
+ANTHROPIC_API_KEY=your-anthropic-api-key-here
+MAX_FILE_SIZE_MB=10
+ALLOWED_EXTENSIONS=.pdf,.docx
 ```
 
 ### 5. Start the development server:
@@ -65,40 +77,61 @@ Once the server is running, visit:
 
 ## Database Schema
 
-The application uses a single `documents` table in Supabase with the following structure:
+The application uses Firebase Firestore with the following collections:
 
-```sql
-CREATE TABLE documents (
-    id BIGSERIAL PRIMARY KEY,
-    filename VARCHAR(255) NOT NULL,
-    original_filename VARCHAR(255) NOT NULL,
-    content_type VARCHAR(100) NOT NULL,
-    file_size INTEGER NOT NULL,
-    file_path VARCHAR(500) NOT NULL,
-    storage_path VARCHAR(500),
-    description TEXT,
-    tags JSONB,
-    is_active BOOLEAN DEFAULT true,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
-    updated_at TIMESTAMP WITH TIME ZONE
-);
+### Documents Collection
+
+```javascript
+{
+  id: "auto-generated-doc-id",
+  filename: "unique-filename.pdf",
+  original_filename: "original-name.pdf", 
+  content_type: "application/pdf",
+  file_size: 1024000,
+  storage_path: "documents/unique-filename.pdf",
+  is_active: true,
+  created_at: "2024-01-01T00:00:00Z",
+  updated_at: "2024-01-01T00:00:00Z",
+  folder_id: "optional-folder-id",
+  folder_name: "optional-folder-name"
+}
+```
+
+### Document Summaries Collection
+
+```javascript
+{
+  document_id: "document-id-reference",
+  summary_text: "AI-generated summary text...",
+  created_at: "2024-01-01T00:00:00Z", 
+  updated_at: "2024-01-01T00:00:00Z"
+}
 ```
 
 ## Storage
 
 The application uses a hybrid storage approach:
-- **Supabase Storage**: Primary storage for files
-- **Local Storage**: Backup storage in the `uploads/` folder
+
+- **Firestore Storage**: Primary storage for files
+
+## AI-Powered Features
+
+The service includes intelligent document processing:
+
+- **Document Summarization**: Uses Anthropic Claude to generate concise, structured summaries
+- **PDF Text Extraction**: Automatic text extraction from PDF documents  
+- **Background Processing**: Asynchronous summarization without blocking uploads
 
 ## Project Structure
 
-```
+```text
 document-vault-service/
 ├── app/
 │   ├── __init__.py
 │   ├── main.py                 # FastAPI application
 │   ├── config.py              # Configuration settings
-│   ├── database.py            # Supabase client setup
+│   ├── database.py            # Firebase client setup
+│   ├── service-account.json   # Firebase credentials (not in git)
 │   ├── models/
 │   │   ├── __init__.py
 │   │   └── document.py        # Pydantic models
@@ -113,18 +146,21 @@ document-vault-service/
 │   │       └── documents.py   # Document routes
 │   ├── services/
 │   │   ├── __init__.py
-│   │   └── document_service.py # Business logic
+│   │   ├── document_service.py # Business logic
+│   │   ├── llm_service.py     # AI/Claude integration
+│   │   └── summarize_service.py # Document summarization
 │   └── utils/
 │       ├── __init__.py
-│       └── security.py
+│       ├── common.py
+│       └── filename_utils.py
 ├── tests/
 │   ├── __init__.py
-│   └── test_documents.py
+│   ├── test_documents.py
+│   └── test_document_summary.py
 ├── uploads/                   # Local file storage
 ├── requirements.txt
-├── supabase_setup.sql         # Database setup script
 ├── .env.example
-├── .env
+├── .env                       # Your environment variables (not in git)
 ├── .gitignore
 └── README.md
 ```
@@ -138,16 +174,49 @@ pytest
 
 ## API Endpoints
 
-- `POST /api/v1/documents/` - Upload a document
-- `GET /api/v1/documents/` - List all documents
-- `GET /api/v1/documents/{id}` - Get a specific document
-- `PUT /api/v1/documents/{id}` - Update document metadata
-- `DELETE /api/v1/documents/{id}` - Delete a document (soft delete)
-- `GET /api/v1/documents/{id}/download` - Download a document
+The service provides the following REST API endpoints:
+
+- `POST /api/v1/documents/create` - Upload a document with optional folder organization
+  - Accepts multipart/form-data with file, folderName, and folderId
+  - Returns document metadata and triggers background summarization
+  
+- `GET /api/v1/documents/` - List all documents in hierarchical folder structure
+  - Optional folder_id parameter to get specific folder contents
+  - Returns nested folder and file structure
+  
+- `GET /api/v1/documents/{document_id}/summary` - Get AI-generated summary for a document
+  - Returns document summary with metadata
+  - Uses cached summary or generates new one via Claude API
+
+## Models and Schemas
+
+### Core Models
+
+- **Document**: Base document model with file metadata
+- **DocumentSummary**: AI-generated summary model with text content
+- **DocumentResponse**: API response model for document operations
+- **AISummaryResponse**: API response model for summary operations  
+- **FolderItem**: Hierarchical folder structure model
+- **FileItem**: Individual file item in folder hierarchy
+
+### Schema Features
+
+- **Hierarchical Structure**: Support for nested folders and files
+- **Type Safety**: Full Pydantic validation and serialization
+- **Backward Compatibility**: Maintained aliases for legacy endpoints
+- **Recursive Models**: Self-referencing folder structures
+
+
+The test suite includes:
+
+- **Document Operations**: Upload, retrieval, and storage tests
+- **AI Summarization**: LLM integration and fallback testing
+- **Background Tasks**: Asynchronous processing validation
 
 ## Security Notes
 
 ### Environment Files
+
 - **`.env.example`**: Template file with placeholder values - **SAFE to commit to git**
 - **`.env`**: Your actual file with real credentials - **NEVER commit to git** (excluded in .gitignore)
 
@@ -155,11 +224,11 @@ Always use placeholder/dummy values in `.env.example` and real secrets only in `
 
 ## Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `SUPABASE_URL` | Your Supabase project URL | Required |
-| `SUPABASE_ANON_KEY` | Supabase anonymous key | Required |
-| `SUPABASE_SERVICE_KEY` | Supabase service key (optional) | "" |
-| `SECRET_KEY` | JWT secret key | "your-super-secret-key..." |
-| `MAX_FILE_SIZE_MB` | Maximum file size in MB | 10 |
-| `SUPABASE_STORAGE_BUCKET` | Supabase storage bucket name | "documents" |
+| Variable | Description | Default | Required |
+|----------|-------------|---------|----------|
+| `FIREBASE_PROJECT_ID` | Your Firebase project ID | "" | Yes |
+| `FIREBASE_STORAGE_BUCKET` | Firebase storage bucket name | "" | Yes |
+| `FIREBASE_CREDENTIALS_PATH` | Path to service account JSON | `app/service-account.json` | Yes |
+| `ANTHROPIC_API_KEY` | Anthropic Claude API key for summarization | "" | No |
+| `MAX_FILE_SIZE_MB` | Maximum file size in MB | 10 | No |
+| `ALLOWED_EXTENSIONS` | Comma-separated file extensions | ".pdf,.docx" | No |
