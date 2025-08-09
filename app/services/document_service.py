@@ -116,8 +116,8 @@ class DocumentService:
         folderName: str,
         folderId: str
     ) -> DocumentResponse:
-        
-        logger.info("Starting upload for file '%s' (content_type=%s, folderName=%s)", file.filename, file.content_type, folderName)
+
+        logger.info("Starting upload for file '%s' (content_type=%s, folderName=%s, folderId=%s)", file.filename, file.content_type, folderName, folderId)
 
         # 1. Process filename - remove folder name if folderName is provided
         cleaned_filename, filename_metadata = process_filename_with_folder(
@@ -138,7 +138,7 @@ class DocumentService:
 
         # 4. Upload to Firebase Storage
         try:
-            logger.debug("Uploading to Firebase Storage bucket '%s' path '%s'", settings.FIREBASE_STORAGE_BUCKET, filename)
+            logger.debug("Uploading to Firebase Storage bucket '%s' path '%s'", settings.FIREBASE_STORAGE_BUCKET, filename, folderId)
             bucket = self.storage_client.bucket(settings.FIREBASE_STORAGE_BUCKET)
             blob = bucket.blob(filename)
             
@@ -164,7 +164,7 @@ class DocumentService:
         # Generate public URL or signed URL
         try:
            
-            logger.info("Generating signed URL for blob '%s'", filename)
+            logger.debug("Generating signed URL for blob '%s'", filename)
             signed_url = blob.generate_signed_url(
                     version="v4",
                     expiration=datetime.utcnow() + timedelta(days=7),
@@ -258,6 +258,7 @@ class DocumentService:
             if not all_docs:
                 return []
             
+            logger.info("Found %d active documents in Firestore", len(all_docs))
             # Group documents by folder_name to create folder structure
             folder_groups: Dict[str, List[Dict[str, Any]]] = {}
             documents_without_folder = []
@@ -265,13 +266,11 @@ class DocumentService:
             for doc in all_docs:
                 doc_data = doc.to_dict()
                 doc_data["id"] = doc.id
-                
-                # Group by folder_name if it exists
-                folder_name = doc_data.get("folder_name")
+                # Group by folder_id if it exists
                 folder_id = doc_data.get("folder_id")
-                
-                if folder_name and folder_name.strip():
-                    if folder_name not in folder_groups:
+
+                if folder_id:
+                    if folder_id not in folder_groups:
                         folder_groups[folder_id] = []
                     folder_groups[folder_id].append(doc_data)
                 else:
