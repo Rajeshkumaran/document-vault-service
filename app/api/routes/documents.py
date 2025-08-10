@@ -1,5 +1,5 @@
 import os
-from typing import List, Optional
+from typing import List, Optional, Union
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks
 from google.cloud import firestore, storage
 import logging
@@ -17,8 +17,7 @@ router = APIRouter()
 @router.post("/documents/create", response_model=DocumentResponse)
 async def create_document(
     background_tasks: BackgroundTasks,
-    folderName: str = Form(""),
-    folderId: str = Form(""),
+    meta_data: str = Form(...),
     file: UploadFile = File(...),
     firestore_client = Depends(get_firestore_client),
     storage_client = Depends(get_storage_client)
@@ -27,20 +26,20 @@ async def create_document(
 
     Expected multipart/form-data keys:
       - file (the uploaded file)
+      - meta_data (JSON string containing optional current_folder_id)
     """
 
-    logger.info("[documents] Starting upload for file '%s' (content_type=%s, folderName=%s)", file.filename, file.content_type, folderName)
+    logger.info("[documents] Starting upload for file '%s' (content_type=%s)", file.filename, file.content_type)
     
     service = DocumentService()
     document = await service.create_document(
         file=file, 
-        folderName=folderName, 
-        folderId=folderId,
+        meta_data=meta_data,
         background_tasks=background_tasks
     )
     return document
 
-@router.get("/documents", response_model=list[FolderItem | FileItem])
+@router.get("/documents", response_model=List[Union[FolderItem, FileItem]])
 async def get_documents(
     folder_id: Optional[str] = None,
     firestore_client = Depends(get_firestore_client),
@@ -59,7 +58,6 @@ async def get_documents(
     service = DocumentService()
     items = await service.get_documents()
     return items
-
 
 
 @router.get("/documents/{document_id}/summary", response_model=AISummaryResponse)

@@ -45,6 +45,7 @@ class DocumentSummaryResponse(BaseModel):
     class Config:
         from_attributes = True
 
+
 # Hierarchical folder/document structure schemas
 class FileItem(BaseModel):
     id: str

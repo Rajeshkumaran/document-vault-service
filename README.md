@@ -13,6 +13,14 @@ A FastAPI-based document management service powered by Firebase/Google Cloud wit
 - File validation and processing
 - Background task processing for document summarization
 
+## Quick Start
+
+1. **Prerequisites**: Have Python 3.8+ and a Firebase project ready
+2. **Setup**: `./setup.sh` - Sets up environment and dependencies
+3. **Configure**: Edit `.env` file with your Firebase credentials
+4. **Run**: `./run.sh` - Starts the development server
+5. **Access**: Visit <http://localhost:8000/docs> for API documentation
+
 ## Prerequisites
 
 1. **Firebase Project**: Create a new project at [firebase.google.com](https://firebase.google.com)
@@ -23,6 +31,26 @@ A FastAPI-based document management service powered by Firebase/Google Cloud wit
 3. **Anthropic API Key**: Optional, for AI-powered document summarization
 
 ## Setup
+
+### Option 1: Quick Setup (Recommended)
+
+Use the provided setup script to automatically handle the environment setup:
+
+```bash
+# Make scripts executable (first time only)
+chmod +x setup.sh run.sh
+
+# Run the setup script
+./setup.sh
+```
+
+The setup script will:
+- Create a Python virtual environment
+- Install all dependencies from requirements.txt
+- Create `.env` file from template (if it doesn't exist)
+- Provide guidance for next steps
+
+### Option 2: Manual Setup
 
 ### 1. Create a virtual environment:
 ```bash
@@ -64,16 +92,37 @@ MAX_FILE_SIZE_MB=10
 ALLOWED_EXTENSIONS=.pdf,.docx
 ```
 
-### 5. Start the development server:
+### 5. Start the development server
+
+**Option A: Using the run script (Recommended)**
+
 ```bash
-uvicorn app.main:app --reload
+./run.sh
+```
+
+The run script will:
+- Check if `.env` file exists (creates it if missing)
+- Start the FastAPI server on `http://localhost:8000`
+- Enable auto-reload for development
+
+**Option B: Manual start**
+
+```bash
+# Activate virtual environment (if not already active)
+source venv/bin/activate
+
+# Start the server manually
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 ## API Documentation
 
 Once the server is running, visit:
-- Swagger UI: <http://localhost:7000/docs>
-- ReDoc: <http://localhost:7000/redoc>
+
+- Swagger UI: <http://localhost:8000/docs>
+- ReDoc: <http://localhost:8000/redoc>
+
+**Note**: The default port is 8000 when using `./run.sh` script or manual uvicorn command.
 
 ## Database Schema
 
@@ -93,7 +142,6 @@ The application uses Firebase Firestore with the following collections:
   created_at: "2024-01-01T00:00:00Z",
   updated_at: "2024-01-01T00:00:00Z",
   folder_id: "optional-folder-id",
-  folder_name: "optional-folder-name"
 }
 ```
 

@@ -4,6 +4,7 @@ import os
 import uuid
 import logging
 import asyncio
+import json
 from typing import List, Dict, Any
 from datetime import datetime, timedelta
 from fastapi import UploadFile, HTTPException, BackgroundTasks
@@ -14,6 +15,7 @@ from datetime import datetime
 from app.schemas.document import AISummaryResponse, DocumentResponse, FolderItem, FileItem
 from app.models.document import DocumentSummary
 from app.services.summarize_service import SummarizeService
+from app.services.folder_service import FolderService
 from app.config import settings
 from app.utils import process_filename_with_folder, extract_filename_parts
 from app.utils.common import extract_blob_name, normalize_datetime, download_blob_text_with_parsing
@@ -176,22 +178,41 @@ class DocumentService:
     def __init__(self):
         self.firestore_client = get_firestore_client()
         self.storage_client = get_storage_client()
+        self.folder_service = FolderService()
 
    
     async def create_document(
         self,
         file: UploadFile,
-        folderName: str,
-        folderId: str,
+        meta_data: str,
         background_tasks: Optional[BackgroundTasks] = None
     ) -> DocumentResponse:
 
-        logger.info("Starting upload for file '%s' (content_type=%s, folderName=%s, folderId=%s)", file.filename, file.content_type, folderName, folderId)
+        # Parse metadata
+        try:
+            metadata = json.loads(meta_data)
+            current_folder_id = metadata.get("current_folder_id")
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.error("Failed to parse meta_data: %s", str(e))
+            raise HTTPException(status_code=400, detail="Invalid meta_data format. Must be valid JSON.")
 
-        # 1. Process filename - remove folder name if folderName is provided
+        
+
+        # Determine folder ID for the document
+        if current_folder_id:
+            logger.debug("Using existing folder '%s'", current_folder_id)
+            # Use existing folder
+            folder_id = current_folder_id
+            folder_name = None
+        else:
+            # Fallback folder name
+            folder_name = "Root"
+            folder_id = await self.folder_service.create_folder("Root", current_folder_id)
+            
+        # 1. Process filename - remove folder name if folder_name is provided
         cleaned_filename, filename_metadata = process_filename_with_folder(
             original_filename=file.filename,
-            folder_name=folderName
+            folder_name=folder_name
         )
         
         
@@ -207,7 +228,7 @@ class DocumentService:
 
         # 4. Upload to Firebase Storage
         try:
-            logger.debug("Uploading to Firebase Storage bucket '%s' path '%s'", settings.FIREBASE_STORAGE_BUCKET, filename, folderId)
+            logger.debug("Uploading to Firebase Storage bucket '%s' path '%s'", settings.FIREBASE_STORAGE_BUCKET, filename)
             bucket = self.storage_client.bucket(settings.FIREBASE_STORAGE_BUCKET)
             blob = bucket.blob(filename)
             
@@ -250,7 +271,7 @@ class DocumentService:
         try:
             doc_id = str(uuid.uuid4())  # Generate document ID
             current_time = datetime.utcnow()
-            
+            logger.info("Before uploading starts %s", folder_id)
             insert_payload = {
                 "filename": filename,
                 "original_filename": filename_metadata["original_filename"],  # Keep the original filename with folder
@@ -260,9 +281,7 @@ class DocumentService:
                 "storage_path": storage_url,
                 "is_active": True,
                 "created_at": current_time,
-                
-                "folder_name": filename_metadata["folder_name"],  # Store folder name separately
-                "folder_id": folderId
+                "folder_id": folder_id
             }
             
             logger.debug("Inserting metadata to Firestore: %s", insert_payload)
@@ -325,77 +344,116 @@ class DocumentService:
         )
     
     async def get_documents(self) -> List[Union['FolderItem', 'FileItem']]:
-        """Return a flat list of FolderItem and FileItem objects representing
-        the current document hierarchy. Each folder contains its children.
+        """Return a hierarchical list of FolderItem and FileItem objects representing
+        the current document hierarchy. Folders with parent_id=null are at root level,
+        folders with parent_id become children of their parent, and documents are
+        associated with folders via folder_id.
         """
         try:
+            # Get all folders from Firestore
+            folders_ref = self.firestore_client.collection("folders")
+            folders_query = folders_ref.where("is_active", "==", True)
+            folders_docs = folders_query.stream()
+            
             # Get all documents from Firestore
             docs_ref = self.firestore_client.collection("documents")
+            docs_query = docs_ref.where("is_active", "==", True)
+            docs = docs_query.stream()
             
-            # Get all active documents
-            query = docs_ref.where("is_active", "==", True)     
-            docs = query.stream()
+            # Convert to lists and add IDs
+            all_folders = []
+            for folder_doc in folders_docs:
+                folder_data = folder_doc.to_dict()
+                folder_data["id"] = folder_doc.id
+                all_folders.append(folder_data)
             
-            # If no documents found and no folder_id specified, return sample structure
-            all_docs = list(docs)
-            if not all_docs:
+            all_docs = []
+            for doc in docs:
+                doc_data = doc.to_dict()
+                doc_data["id"] = doc.id
+                all_docs.append(doc_data)
+            
+            logger.info("Found %d active folders and %d active documents in Firestore", 
+                       len(all_folders), len(all_docs))
+            
+            # If no folders and no documents found, return empty list
+            if not all_folders and not all_docs:
                 return []
             
-            logger.info("Found %d active documents in Firestore", len(all_docs))
-            # Group documents by folder_name to create folder structure
-            folder_groups: Dict[str, List[Dict[str, Any]]] = {}
+            # Create folder lookup dictionary for easy access
+            folders_dict = {folder["id"]: folder for folder in all_folders}
+            
+            # Group documents by folder_id
+            documents_by_folder: Dict[str, List[Dict[str, Any]]] = {}
             documents_without_folder = []
             
             for doc in all_docs:
-                doc_data = doc.to_dict()
-                doc_data["id"] = doc.id
-                # Group by folder_id if it exists
-                folder_id = doc_data.get("folder_id")
-
-                if folder_id:
-                    if folder_id not in folder_groups:
-                        folder_groups[folder_id] = []
-                    folder_groups[folder_id].append(doc_data)
+                folder_id = doc.get("folder_id")
+                if folder_id and folder_id in folders_dict:
+                    if folder_id not in documents_by_folder:
+                        documents_by_folder[folder_id] = []
+                    documents_by_folder[folder_id].append(doc)
                 else:
-                    documents_without_folder.append(doc_data)
+                    documents_without_folder.append(doc)
             
-            # Create the root folder structure
-            items = []
-
-            # Add folder items
-            for folder_id, folder_docs in folder_groups.items():
-                # Create folder item
-                folder_item = FolderItem(
-                    id=folder_id,
-                    name=folder_docs[0].get("folder_name"),
-                    created_at=normalize_datetime(folder_docs[0].get("created_at")),
-                    children=[]
-                )
-                
-                # Add files to folder
-                for doc in folder_docs:
-                    file_extension = doc.get("file_type", "").lower().replace(".", "")
-                    file_item = FileItem(
-                        id=doc["id"],
-                        name=doc["original_filename"],
-                        created_at=normalize_datetime(doc.get("created_at")),
-                        file_type=file_extension,
-                        storage_path=doc["storage_path"]
-                    )
-                    folder_item.children.append(file_item)
-                
-                items.append(folder_item)
-            
-            # Add files without folder directly to root
-            for doc in documents_without_folder:
+            # Helper function to convert document to FileItem
+            def create_file_item(doc: Dict[str, Any]) -> FileItem:
                 file_extension = doc.get("file_type", "").lower().replace(".", "")
-                file_item = FileItem(
+                return FileItem(
                     id=doc["id"],
                     name=doc["original_filename"],
                     created_at=normalize_datetime(doc.get("created_at")),
                     file_type=file_extension,
                     storage_path=doc["storage_path"]
                 )
+            
+            # Helper function to build folder tree recursively
+            def build_folder_item(folder_data: Dict[str, Any], processed_folders: set) -> FolderItem:
+                folder_id = folder_data["id"]
+                
+                # Avoid infinite loops by checking if folder is already being processed
+                if folder_id in processed_folders:
+                    logger.warning("Circular reference detected for folder %s", folder_id)
+                    return None
+                
+                processed_folders.add(folder_id)
+                
+                # Create folder item
+                folder_item = FolderItem(
+                    id=folder_id,
+                    name=folder_data.get("name", "Unnamed Folder"),
+                    created_at=normalize_datetime(folder_data.get("created_at")),
+                    children=[]
+                )
+                
+                # Add documents to this folder
+                if folder_id in documents_by_folder:
+                    for doc in documents_by_folder[folder_id]:
+                        file_item = create_file_item(doc)
+                        folder_item.children.append(file_item)
+                
+                # Add child folders to this folder
+                child_folders = [f for f in all_folders if f.get("parent_id") == folder_id]
+                for child_folder in child_folders:
+                    child_folder_item = build_folder_item(child_folder, processed_folders.copy())
+                    if child_folder_item:
+                        folder_item.children.append(child_folder_item)
+                
+                return folder_item
+            
+            # Build the root level items
+            items = []
+            
+            # Add root level folders (parent_id is null or not present)
+            root_folders = [f for f in all_folders if f.get("parent_id") is None]
+            for folder in root_folders:
+                folder_item = build_folder_item(folder, set())
+                if folder_item:
+                    items.append(folder_item)
+            
+            # Add files without folder directly to root
+            for doc in documents_without_folder:
+                file_item = create_file_item(doc)
                 items.append(file_item)
             
             # Return actual Pydantic models; FastAPI will handle serialization

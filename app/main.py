@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 import os
 import logging
 
-from app.api.routes import documents
+from app.api.routes import documents, folder
 from app.config import settings
 
 
@@ -40,6 +40,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(documents.router, prefix="/api/v1", tags=["documents"])
+app.include_router(folder.router, prefix="/api/v1", tags=["folders"])
 
 @app.get("/")
 async def root():
