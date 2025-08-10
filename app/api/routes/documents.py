@@ -5,7 +5,7 @@ from google.cloud import firestore, storage
 import logging
 
 from app.database import get_firestore_client, get_storage_client
-from app.schemas.document import DocumentResponse, FolderItem, FileItem, AISummaryResponse, DocumentSummaryCreate, DocumentSummaryResponse
+from app.schemas.document import DocumentResponse, FolderItem, FileItem, AISummaryResponse, DocumentSummaryCreate, DocumentSummaryResponse, AIInsightsResponse
 from app.services.document_service import DocumentService
 from app.services.summarize_service import SummarizeService
 from app.config import settings
@@ -78,5 +78,26 @@ async def get_document_summary(
 
     service = DocumentService()
     document = await service.get_document_summary(document_id=document_id)
+    return document
+
+
+@router.get("/documents/{document_id}/insights", response_model=AIInsightsResponse)
+async def get_document_insights(
+    document_id: str,
+    firestore_client = Depends(get_firestore_client),
+    storage_client = Depends(get_storage_client)
+):
+    """Get insights for a specific document.
+
+    Args:
+        document_id: The ID of the document to retrieve insights for
+
+    Returns:
+        AIInsightsResponse: The document insights including extracted key information
+    """
+    logger.info("[documents] Getting insights for document_id=%s", document_id)
+
+    service = DocumentService()
+    document = await service.get_document_insights(document_id=document_id)
     return document
 

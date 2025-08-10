@@ -1,6 +1,7 @@
 from datetime import datetime
 from typing import Optional
 import logging
+import json
 from google.cloud import storage
 import io
 from app.config import settings
@@ -13,6 +14,46 @@ def normalize_datetime(dt):
     if hasattr(dt, "replace"):  # works for both datetime and DatetimeWithNanoseconds
         return dt.replace(tzinfo=None)  # remove tzinfo if needed
     return dt
+
+
+def clean_json_response(response_text: str) -> str:
+    """Clean JSON response by removing markdown formatting and returning valid JSON.
+    
+    Args:
+        response_text: Raw response text that may contain markdown formatting
+        
+    Returns:
+        Cleaned JSON string, or empty JSON object "{}" if invalid
+    """
+    if not response_text:
+        return "{}"
+    
+    cleaned = response_text.strip()
+    
+    # Remove markdown code block formatting
+    if cleaned.startswith('```json'):
+        cleaned = cleaned[7:]  # Remove ```json
+        if cleaned.endswith('```'):
+            cleaned = cleaned[:-3]  # Remove trailing ```
+    elif cleaned.startswith('```'):
+        cleaned = cleaned[3:]  # Remove ```
+        if cleaned.endswith('```'):
+            cleaned = cleaned[:-3]  # Remove trailing ```
+    
+    # Remove any extra whitespace or newlines at the start/end
+    cleaned = cleaned.strip()
+    
+    # If the response is empty after cleaning, return empty JSON
+    if not cleaned:
+        return "{}"
+    
+    # Validate that it's valid JSON
+    try:
+        json.loads(cleaned)  # This will raise JSONDecodeError if invalid
+        return cleaned
+    except json.JSONDecodeError:
+        logger.warning("Cleaned response is not valid JSON: %s", repr(cleaned[:100]))
+        return "{}"
 
 
 from urllib.parse import urlparse, unquote

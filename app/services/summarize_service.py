@@ -177,3 +177,9 @@ class SummarizeService:
         except Exception as e:
             logger.exception("Unexpected error deleting document summary")
             raise HTTPException(status_code=500, detail=f"Failed to delete document summary: {e}")
+
+
+# Convenience function to get summarize service instance
+def get_summarize_service() -> SummarizeService:
+    """Get an instance of the SummarizeService."""
+    return SummarizeService()

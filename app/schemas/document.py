@@ -45,6 +45,50 @@ class DocumentSummaryResponse(BaseModel):
     class Config:
         from_attributes = True
 
+# Insights-related schemas
+class FinancialAmount(BaseModel):
+    label: str
+    value: Union[str, float]
+    currency: Optional[str] = None
+
+class ImportantDate(BaseModel):
+    label: str
+    date: str
+
+class FinancialData(BaseModel):
+    amounts: List[FinancialAmount] = []
+    dates: List[ImportantDate] = []
+
+class KeyInsights(BaseModel):
+    financial_data: FinancialData = FinancialData()
+    coverage_details: List[str] = []
+    critical_information: List[str] = []
+
+class DocumentInsights(BaseModel):
+    document_type: str
+    key_insights: KeyInsights = KeyInsights()
+    confidence_score: float = Field(ge=0.0, le=1.0)
+
+class AIInsightsResponse(DocumentBase):
+    id: str
+    insights: Optional[DocumentInsights] = None
+
+    class Config:
+        from_attributes = True
+
+class DocumentInsightsCreate(BaseModel):
+    document_id: str
+    insights_data: str  # JSON string of insights
+
+class DocumentInsightsResponse(BaseModel):
+    document_id: str
+    insights_data: str  # JSON string of insights
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
 
 # Hierarchical folder/document structure schemas
 class FileItem(BaseModel):

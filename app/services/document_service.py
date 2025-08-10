@@ -12,13 +12,15 @@ from app.database import get_firestore_client, get_storage_client, get_storage_b
 from google.cloud.exceptions import GoogleCloudError
 from datetime import datetime
 
-from app.schemas.document import AISummaryResponse, DocumentResponse, FolderItem, FileItem
+from app.schemas.document import AISummaryResponse, DocumentResponse, FolderItem, FileItem, AIInsightsResponse
+from app.services.summarize_service import SummarizeService
+from app.services.insights_service import InsightsService
 from app.models.document import DocumentSummary
 from app.services.summarize_service import SummarizeService
 from app.services.folder_service import FolderService
 from app.config import settings
 from app.utils import process_filename_with_folder, extract_filename_parts
-from app.utils.common import extract_blob_name, normalize_datetime, download_blob_text_with_parsing
+from app.utils.common import extract_blob_name, normalize_datetime, download_blob_text_with_parsing, clean_json_response
 
 logger = logging.getLogger("app.document_service")
 
@@ -665,3 +667,189 @@ class DocumentService:
             except Exception:
                 pass
             # Don't raise exceptions in background tasks as they won't be handled by the caller
+
+    async def get_document_insights(self, document_id: str) -> AIInsightsResponse:
+        """Get document insights using the SummarizeService and LLM insights extraction."""
+        try:
+            import json
+            logger.info("Getting insights for document_id=%s", document_id)
+            
+            # Get document details
+            doc_ref = self.firestore_client.collection("documents").document(document_id)
+            import asyncio
+            loop = asyncio.get_running_loop()
+            doc = await loop.run_in_executor(None, doc_ref.get)
+            if not doc.exists:
+                raise HTTPException(status_code=404, detail="Document not found")
+            
+            doc_data = doc.to_dict()
+            filename = doc_data.get("filename", "")
+            
+            # Initialize insights service
+            insights_service = InsightsService()
+            
+            # First get the document summary (required for insights generation)
+            summary_response = await self.get_document_summary(document_id)
+            summary_text = summary_response.summary
+            
+            if not summary_text or summary_text.strip() == "":
+                logger.warning("No summary available for insights generation")
+                fallback_insights = {
+                    "document_type": "unknown",
+                    "key_insights": {
+                        "financial_data": {"amounts": [], "dates": []},
+                        "coverage_details": [],
+                        "critical_information": ["No summary available for insights generation"]
+                    },
+                    "confidence_score": 0.0
+                }
+                response_data = {
+                    "id": document_id,
+                    "filename": filename,
+                    "insights": fallback_insights
+                }
+                return AIInsightsResponse(**response_data)
+            
+            # Get or generate insights from the summary
+            insights_json = await insights_service.get_or_generate_insights(
+                document_id, summary_text, filename
+            )
+
+            
+            # Parse the insights JSON
+            try:
+                if insights_json is None:
+                    logger.warning("insights_json is None")
+                    insights_dict = {}
+                elif isinstance(insights_json, str):
+                    logger.info("Parsing insights_json as string, length: %d", len(insights_json))
+                    
+                    # Clean the JSON response using the common utility
+                    cleaned_json = clean_json_response(insights_json)
+                    logger.info("Cleaned JSON length: %d", len(cleaned_json))
+                    
+                    insights_dict = json.loads(cleaned_json)
+                elif isinstance(insights_json, dict):
+                    logger.info("insights_json is already a dict")
+                    insights_dict = insights_json
+                else:
+                    logger.warning("Unexpected insights_json type: %s", type(insights_json))
+                    insights_dict = {}
+            except json.JSONDecodeError as e:
+                logger.error("Failed to parse insights JSON: %s", str(e))
+                logger.error("Raw insights_json content: %s", repr(insights_json))
+                insights_dict = {
+                    "document_type": "unknown",
+                    "key_insights": {
+                        "financial_data": {"amounts": [], "dates": []},
+                        "coverage_details": [],
+                        "critical_information": ["Failed to parse insights data"]
+                    },
+                    "confidence_score": 0.0
+                }
+            except Exception as e:
+                logger.error("Unexpected error parsing insights JSON: %s", str(e))
+                logger.error("Raw insights_json content: %s", repr(insights_json))
+                insights_dict = {
+                    "document_type": "unknown",
+                    "key_insights": {
+                        "financial_data": {"amounts": [], "dates": []},
+                        "coverage_details": [],
+                        "critical_information": ["Unexpected error parsing insights data"]
+                    },
+                    "confidence_score": 0.0
+                }
+            
+            # Validate and ensure proper structure of insights_dict
+            if not isinstance(insights_dict, dict):
+                logger.warning("insights_dict is not a dictionary, converting to default structure")
+                insights_dict = {
+                    "document_type": "unknown",
+                    "key_insights": {
+                        "financial_data": {"amounts": [], "dates": []},
+                        "coverage_details": [],
+                        "critical_information": ["Invalid insights data structure"]
+                    },
+                    "confidence_score": 0.0
+                }
+            else:
+                # Ensure required keys exist
+                if "document_type" not in insights_dict:
+                    insights_dict["document_type"] = "unknown"
+                
+                if "key_insights" not in insights_dict:
+                    insights_dict["key_insights"] = {
+                        "financial_data": {"amounts": [], "dates": []},
+                        "coverage_details": [],
+                        "critical_information": []
+                    }
+                elif not isinstance(insights_dict["key_insights"], dict):
+                    insights_dict["key_insights"] = {
+                        "financial_data": {"amounts": [], "dates": []},
+                        "coverage_details": [],
+                        "critical_information": []
+                    }
+                else:
+                    # Ensure sub-keys exist in key_insights
+                    key_insights = insights_dict["key_insights"]
+                    if "financial_data" not in key_insights:
+                        key_insights["financial_data"] = {"amounts": [], "dates": []}
+                    elif not isinstance(key_insights["financial_data"], dict):
+                        key_insights["financial_data"] = {"amounts": [], "dates": []}
+                    else:
+                        # Validate financial_data structure
+                        fin_data = key_insights["financial_data"]
+                        if "amounts" not in fin_data or not isinstance(fin_data["amounts"], list):
+                            fin_data["amounts"] = []
+                        if "dates" not in fin_data or not isinstance(fin_data["dates"], list):
+                            fin_data["dates"] = []
+                    
+                    if "coverage_details" not in key_insights:
+                        key_insights["coverage_details"] = []
+                    elif not isinstance(key_insights["coverage_details"], list):
+                        key_insights["coverage_details"] = []
+                    
+                    if "critical_information" not in key_insights:
+                        key_insights["critical_information"] = []
+                    elif not isinstance(key_insights["critical_information"], list):
+                        key_insights["critical_information"] = []
+                
+                if "confidence_score" not in insights_dict:
+                    insights_dict["confidence_score"] = 0.0
+                elif not isinstance(insights_dict["confidence_score"], (int, float)):
+                    insights_dict["confidence_score"] = 0.0
+            
+            logger.info("Final insights_dict structure validated successfully")
+            
+            # Create DocumentInsights object from the validated dictionary
+            try:
+                from app.schemas.document import DocumentInsights
+                insights_obj = DocumentInsights(**insights_dict)
+            except Exception as e:
+                logger.error("Failed to create DocumentInsights object: %s", str(e))
+                logger.error("insights_dict content: %s", insights_dict)
+                # Create a minimal valid insights object as fallback
+                insights_obj = DocumentInsights(
+                    document_type="unknown",
+                    key_insights={
+                        "financial_data": {"amounts": [], "dates": []},
+                        "coverage_details": [],
+                        "critical_information": ["Failed to parse insights structure"]
+                    },
+                    confidence_score=0.0
+                )
+            
+            response_data = {
+                "id": document_id,
+                "filename": filename,
+                "insights": insights_obj
+            }
+            
+            return AIInsightsResponse(**response_data)
+
+        except GoogleCloudError as e:
+            logger.exception("Google Cloud error getting document insights")
+            raise HTTPException(status_code=502, detail=f"Firestore error: {e}")
+        except Exception as e:
+            logger.exception("Unexpected error getting document insights")
+            raise HTTPException(status_code=500, detail=f"Failed to get document insights: {e}")
